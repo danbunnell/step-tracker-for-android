@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">StepTracker</string>
+    <string name="main_fragment_title">Step Tracker</string>
+    <string name="debug_fragment_title">Debug</string>
 </resources>
