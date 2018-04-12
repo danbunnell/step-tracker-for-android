@@ -1,18 +1,17 @@
 package com.danbunnell.steptracker;
 
-import android.content.Context;
 import android.graphics.Color;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.support.v4.app.Fragment;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.TextView;
 
+import com.danbunnell.steptracker.stepservice.AccelerometerListener;
+import com.danbunnell.steptracker.stepservice.StepListener;
+import com.danbunnell.steptracker.stepservice.StepService;
 import com.jjoe64.graphview.GraphView;
 import com.jjoe64.graphview.series.DataPoint;
 import com.jjoe64.graphview.series.LineGraphSeries;
@@ -20,39 +19,88 @@ import com.jjoe64.graphview.series.LineGraphSeries;
 import static android.util.Log.d;
 
 /**
- * A simple {@link Fragment} subclass.
+ * A {@link Fragment} which displays debugging information.
  */
-public class DebugFragment extends Fragment implements SensorEventListener {
+public class DebugFragment extends Fragment {
 
     private static final String TAG = "DebugFragment";
 
-    private static final int GRAPH_WIDTH = 40;
-    private static final int UI_UPDATE_INTERVAL_MS = 50;
-
-    private SensorManager sensorManager;
-    private Sensor accelSensor;
-
-    private float rawAccelMagnitude = 0L;
-
-    private LineGraphSeries<DataPoint> rawAccelSeries = DebugFragment.createSeries(Color.RED);
-    private LineGraphSeries<DataPoint> movingAverage15SmoothedSeries = DebugFragment.createSeries(Color.BLUE);
-    private LineGraphSeries<DataPoint> movingAverage5SmoothedSeries = DebugFragment.createSeries(Color.GREEN);
-    private LineGraphSeries<DataPoint> movingAverage30SmoothedSeries = DebugFragment.createSeries(Color.BLACK);
-
-    private IMovingAverage movingAverage15 = new WindowedMovingAverage(15);
-    private IMovingAverage movingAverage5 = new WindowedMovingAverage(5);
-    private IMovingAverage movingAverage30 = new WindowedMovingAverage(30);
-
-    private final Handler handler = new Handler();
-    private Runnable updateTimer;
-
-    private double lastTimeInSeconds = 0d;
+    /**
+     * the accelerometer data graph width in seconds
+     */
+    private static final float GRAPH_WIDTH_S = 2f;
 
     /**
-     * Required empty public constructor
+     * the user interface update interval
+     */
+    private static final int UI_UPDATE_INTERVAL_MS = 50;
+
+    /**
+     * latest raw acceleration magnitude
+     */
+    private float rawAcceleration = 0L;
+
+    /**
+     * latest filtered acceleration magnitude
+     */
+    private float filteredAcceleration = 0L;
+
+    /**
+     * the current step count
+     */
+    private int currentStepCount = 0;
+
+    /**
+     * the current step count from the step sensor
+     */
+    private int currentStepSensorStepCount = 0;
+
+    /**
+     * series holding raw acceleration data to be displayed via the graph
+     */
+    private LineGraphSeries<DataPoint> rawSeries = DebugFragment.createSeries(Color.RED);
+
+    /**
+     * series holding filtered acceleration data to be displayed via the graph
+     */
+    private LineGraphSeries<DataPoint> filteredSeries = DebugFragment.createSeries(Color.BLACK);
+
+    /**
+     * a thread scheduler
+     */
+    private final Handler handler = new Handler();
+
+    /**
+     * timer that controls user interface update intervals
+     */
+    private Runnable interfaceUpdateTimer;
+
+    /**
+     * the time in seconds since the epoch
+     */
+    private float timeInSeconds = 0f;
+
+    /**
+     * the accelerometer data graph view
+     */
+    private GraphView graphView;
+
+    /**
+     * displays the current step count
+     */
+    private TextView tvCurrentStepCount;
+
+    /**
+     * displays the current step sensor step count
+     */
+    private TextView tvStepSensorStepCount;
+
+    /**
+     * Initializes a new instance of the {@link DebugFragment} class.
+     *
+     * <p>Must accept zero parameters.</p>
      */
     public DebugFragment() {
-        // Required empty public constructor
     }
 
     /**
@@ -69,104 +117,88 @@ public class DebugFragment extends Fragment implements SensorEventListener {
         return inflater.inflate(R.layout.fragment_debug, container, false);
     }
 
+    /**
+     * Called when the fragment is started.
+     */
     @Override
     public void onStart() {
         super.onStart();
-        this.init();
-    }
 
-    /**
-     * Initialize the activities dependencies
-     */
-    private void init() {
-        // Get the accelerometer for later sensing
-        this.sensorManager = (SensorManager) super.getActivity().getSystemService(Context.SENSOR_SERVICE);
-        this.accelSensor = this.sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-
-        // Set up the GraphViews
-        GraphView graphView = this.createGraphView(
+        this.tvCurrentStepCount = super.getActivity().findViewById(R.id.tvCurrentStepCount);
+        this.tvStepSensorStepCount = super.getActivity().findViewById(R.id.tvStepSensorStepCount);
+        this.graphView= this.createGraphView(
                 R.id.graph1,
-                "Accelerometer Raw Data (X: Red, Y: Blue, Z: Green)",
+                "Accelerometer Data (Raw (red), Filtered (black))",
                 "m/s^2");
-        graphView.addSeries(this.rawAccelSeries);
-        graphView.addSeries(this.movingAverage15SmoothedSeries);
-        graphView.addSeries(this.movingAverage5SmoothedSeries);
-        graphView.addSeries(this.movingAverage30SmoothedSeries);
-    }
+        this.graphView.addSeries(this.rawSeries);
+        this.graphView.addSeries(this.filteredSeries);
 
-    /**
-     * This method is called when the sensor we have registered with changes value
-     * @param sensorEvent Sensor event data
-     */
-    @Override
-    public void onSensorChanged(SensorEvent sensorEvent) {
-        switch(sensorEvent.sensor.getType()) {
-            case Sensor.TYPE_ACCELEROMETER:
-                this.rawAccelMagnitude =
-                        sensorEvent.values[DebugFragment.Axis.X.Offset]
-                                + sensorEvent.values[DebugFragment.Axis.Y.Offset]
-                                + sensorEvent.values[DebugFragment.Axis.Z.Offset];
-                this.movingAverage15.Put(this.rawAccelMagnitude);
-                this.movingAverage30.Put(this.rawAccelMagnitude);
-                this.movingAverage5.Put(this.rawAccelMagnitude);
-                d(DebugFragment.TAG, String.format("Raw Magnitude: %.5f", this.rawAccelMagnitude));
-        }
-    }
+        StepService stepService = MainActivity.getStepService();
+        stepService.registerAccelerometerListener(
+                DebugFragment.TAG,
+                new AccelerometerListener() {
+                    @Override
+                    public void onAccelerometerData(float magnitude, float filteredMagnitude) {
+                        rawAcceleration = magnitude;
+                        filteredAcceleration = filteredMagnitude;
+                    }
+                });
 
+        stepService.registerStepListener(
+                DebugFragment.TAG,
+                new StepListener() {
+                    @Override
+                    public void onSteps(int stepCount) {
+                        currentStepCount += stepCount;
+                    }
+                });
 
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int i) {
-        d(DebugFragment.TAG, "onAccuracyChanged() called");
-    }
+        stepService.registerStepDetectorSensorListener(
+                DebugFragment.TAG,
+                new StepListener() {
+                    @Override
+                    public void onSteps(int stepCount) {
+                        currentStepSensorStepCount += stepCount;
+                    }
+                }
+        );
 
-    /**
-     * Called when the activity is resumed
-     */
-    @Override
-    public void onResume() {
-        super.onResume();
-        d(DebugFragment.TAG, "onResume() called");
-        this.sensorManager.registerListener(this, this.accelSensor, SensorManager.SENSOR_DELAY_FASTEST);
+        this.updateUserInterface();
 
-        this.updateTimer = new Runnable() {
+        this.interfaceUpdateTimer = new Runnable() {
+            /**
+             * Runs the user interface update procedure.
+             */
             @Override
             public void run() {
-                d(DebugFragment.TAG, "updateTimer triggered");
-                lastTimeInSeconds += 1d;
-                rawAccelSeries.appendData(new DataPoint(lastTimeInSeconds, rawAccelMagnitude), true, DebugFragment.GRAPH_WIDTH);
-                movingAverage15SmoothedSeries.appendData(new DataPoint(lastTimeInSeconds, movingAverage15.GetAverage()), true, DebugFragment.GRAPH_WIDTH);
-                movingAverage5SmoothedSeries.appendData(new DataPoint(lastTimeInSeconds, movingAverage5.GetAverage()), true, DebugFragment.GRAPH_WIDTH);
-                movingAverage30SmoothedSeries.appendData(new DataPoint(lastTimeInSeconds, movingAverage30.GetAverage()), true, DebugFragment.GRAPH_WIDTH);
-                handler.postDelayed(updateTimer, UI_UPDATE_INTERVAL_MS);
+                updateUserInterface();
+                handler.postDelayed(interfaceUpdateTimer, UI_UPDATE_INTERVAL_MS);
             }
         };
 
-        handler.postDelayed(this.updateTimer, UI_UPDATE_INTERVAL_MS);
+        handler.postDelayed(this.interfaceUpdateTimer, UI_UPDATE_INTERVAL_MS);
     }
 
     /**
-     * Called when the activity is paused
+     * Called when the fragment is stopped.
      */
     @Override
-    public void onPause() {
-        super.onPause();
-        d(DebugFragment.TAG, "onPause() called");
-        this.handler.removeCallbacks(this.updateTimer);
-        this.sensorManager.unregisterListener(this);
+    public void onStop() {
+        super.onStop();
+
+        this.handler.removeCallbacks(this.interfaceUpdateTimer);
+
+        StepService stepService = MainActivity.getStepService();
+        stepService.unregisterStepListener(DebugFragment.TAG);
+        stepService.unregisterAccelerometerListener(DebugFragment.TAG);
     }
 
-    private enum Axis {
-        X(0),
-        Y(1),
-        Z(2);
-
-        public final int Offset;
-
-        private Axis(int offset) {
-            this.Offset = offset;
-        }
-    }
-
+    /**
+     * Creates a series of data points.
+     *
+     * @param color a color for the series when graphed
+     * @return      a series of data points
+     */
     private static LineGraphSeries<DataPoint> createSeries(int color) {
         DataPoint[] points = { new DataPoint(0,0) };
         LineGraphSeries<DataPoint> series = new LineGraphSeries<DataPoint>(points);
@@ -174,14 +206,34 @@ public class DebugFragment extends Fragment implements SensorEventListener {
         return series;
     }
 
+    /**
+     * Creates a graph view.
+     *
+     * @param graphId           the graph view resource id
+     * @param title             the title
+     * @param verticalAxisTitle the Y-axis title
+     * @return                  a graph view
+     */
     private GraphView createGraphView(int graphId, String title, String verticalAxisTitle) {
         GraphView graph = super.getActivity().findViewById(graphId);
         graph.setTitle(title);
         graph.getGridLabelRenderer().setVerticalAxisTitle(verticalAxisTitle);
         graph.getViewport().setXAxisBoundsManual(true);
         graph.getViewport().setMinX(0);
-        graph.getViewport().setMaxX(DebugFragment.GRAPH_WIDTH);
+        graph.getViewport().setMaxX(GRAPH_WIDTH_S);
 
         return graph;
+    }
+
+    /**
+     * Updates the user interface
+     */
+    private void updateUserInterface() {
+        timeInSeconds += UI_UPDATE_INTERVAL_MS / 1000f;
+        int graphWidthDataPoints = Math.round(GRAPH_WIDTH_S / (UI_UPDATE_INTERVAL_MS / 1000));
+        rawSeries.appendData(new DataPoint(timeInSeconds, rawAcceleration), true, graphWidthDataPoints);
+        filteredSeries.appendData(new DataPoint(timeInSeconds, filteredAcceleration), true, graphWidthDataPoints);
+        tvCurrentStepCount.setText("Accelerometer-based steps: " + currentStepCount);
+        tvStepSensorStepCount.setText("Step Sensor steps: " + currentStepSensorStepCount);
     }
 }
